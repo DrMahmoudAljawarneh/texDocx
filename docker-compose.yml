@@ -1,0 +1,74 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  latexml:
+    build: ./latexml-service
+    restart: unless-stopped
+    ports:
+      - "3334-3336:3334-3336"
+    volumes:
+      - shared-data:/shared
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo '' | nc -w 1 localhost 3334"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    build:
+      context: ./backend-gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - shared-data:/shared
+      - ./frontend:/app/frontend
+      - ./backend-gateway/gateway:/app/gateway
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LATEXML_HOST=latexml
+      - LATEXML_PORTS=3334,3335,3336
+      - SHARED_DIR=/shared
+    command: uvicorn gateway.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      redis: { condition: service_healthy }
+      latexml: { condition: service_started }
+
+  worker:
+    build:
+      context: ./backend-worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+    volumes:
+      - shared-data:/shared
+      - ./backend-worker/tasks:/app/tasks
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LATEXML_HOST=latexml
+      - LATEXML_PORTS=3334,3335,3336
+      - SHARED_DIR=/shared
+    command: celery -A tasks.celery_app worker --loglevel=info --pool=threads --concurrency=4
+    depends_on:
+      redis: { condition: service_healthy }
+      latexml: { condition: service_started }
+
+volumes:
+  shared-data:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=256m,uid=1000"

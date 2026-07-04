@@ -1,0 +1,9 @@
+celery==5.4.0
+redis==5.2.1
+lxml==5.3.0
+pybtex==0.24.0
+latex2mathml==3.77.0
+python-docx==1.1.2
+Pillow==11.1.0
+ziamath
+

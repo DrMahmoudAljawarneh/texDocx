@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.DS_Store
+*.log
+*.md
+frontend/
+backend-gateway/
+backend-worker/
+latexml-service/
