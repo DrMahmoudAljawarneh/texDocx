@@ -1,6 +1,7 @@
 import os, json, time, traceback, subprocess, zipfile, shutil
 from pathlib import Path
 from celery import Celery
+import redis as sync_redis
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
@@ -18,8 +19,17 @@ app.conf.update(
     task_time_limit=660,
 )
 
+_redis_pool = None
+
+def _get_redis():
+    global _redis_pool
+    if _redis_pool is None:
+        _redis_pool = sync_redis.ConnectionPool(
+            host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, max_connections=10
+        )
+    return sync_redis.Redis(connection_pool=_redis_pool)
+
 def publish_log(task_id, severity, message, line_number=None):
-    import redis as sync_redis
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "severity": severity,
@@ -28,23 +38,20 @@ def publish_log(task_id, severity, message, line_number=None):
     if line_number:
         entry["line_number"] = line_number
     try:
-        r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = _get_redis()
         r.publish(f"log:{task_id}", json.dumps(entry))
         r.append(f"log:{task_id}", json.dumps(entry) + "\n")
         r.expire(f"log:{task_id}", 3600)
-        r.close()
     except Exception:
         pass
 
 def update_status(task_id, status, progress=None):
-    import redis as sync_redis
     try:
-        r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = _get_redis()
         mapping = {"status": status, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         if progress is not None:
             mapping["progress_percent"] = str(progress)
         r.hset(f"job:{task_id}", mapping=mapping)
-        r.close()
     except Exception:
         pass
 
@@ -72,37 +79,31 @@ def convert(self, payload):
         main_tex = tex_files[0]
         publish_log(task_id, "Info", f"Found main TeX file: {main_tex.name}")
 
-        # Phase 1: Convert vector assets
         update_status(task_id, "PROCESSING", 10)
         from tasks.images import convert_vector_assets
         convert_vector_assets(task_id, extract_dir)
         publish_log(task_id, "Info", "Vector assets converted")
 
-        # Phase 2: Compile LaTeX to XML via latexmls daemon
         update_status(task_id, "PROCESSING", 30)
         from tasks.compiler import compile_latex
         raw_xml = compile_latex(task_id, main_tex, macros)
         publish_log(task_id, "Info", "LaTeX compiled to XML")
 
-        # Phase 3: Parse bibliography
         update_status(task_id, "PROCESSING", 50)
         bib_files = list(extract_dir.rglob("*.bib"))
         from tasks.bibliography import parse_bibliography
         xml_with_bib = parse_bibliography(task_id, raw_xml, bib_files)
         publish_log(task_id, "Info", "Bibliography parsed")
 
-        # Phase 4: Pre-render math
         update_status(task_id, "PROCESSING", 65)
         from tasks.math import pre_render_math
         final_xml = pre_render_math(task_id, xml_with_bib, job_dir)
         publish_log(task_id, "Info", "MathML pre-rendered")
 
-        # Write XML output
         xml_path = job_dir / "output.xml"
         xml_path.write_text(final_xml, encoding="utf-8")
         publish_log(task_id, "Info", f"XML output written to {xml_path}")
 
-        # Phase 5: Generate DOCX if requested
         if fmt in ("docx", "all"):
             update_status(task_id, "PROCESSING", 80)
             from tasks.docxgen import generate_docx
@@ -117,11 +118,8 @@ def convert(self, payload):
         publish_log(task_id, "Complete", "Job finished successfully",
                     line_number=None)
 
-        # Send SSE complete event
-        import redis as sync_redis
-        r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = _get_redis()
         r.publish(f"log:{task_id}", json.dumps({"event": "complete", "status": "SUCCESS"}))
-        r.close()
 
     except Exception as e:
         tb = traceback.format_exc()
@@ -129,25 +127,19 @@ def convert(self, payload):
         publish_log(task_id, "Fatal", tb)
         update_status(task_id, "FAILURE", 0)
 
-        # Send SSE complete event (failure)
-        import redis as sync_redis
-        r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = _get_redis()
         r.publish(f"log:{task_id}", json.dumps({"event": "complete", "status": "FAILURE"}))
-        r.close()
 
-        # Dead-letter queue
-        import redis as sync_redis
         dlq_payload = json.dumps({
             "original_payload": payload,
             "error": str(e),
             "traceback": tb,
             "failed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
-        r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = _get_redis()
         r.set(f"dlq:{task_id}", dlq_payload)
         r.expire(f"dlq:{task_id}", 86400)
         r.lpush("dlq:failed_jobs", task_id)
-        r.close()
 
         raise
     finally:

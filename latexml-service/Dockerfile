@@ -17,15 +17,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libimage-magick-perl \
     libparse-recdescent-perl \
     libhttp-daemon-perl \
+    libfile-which-perl \
+    libpod-parser-perl \
+    libjson-xs-perl \
+    libimage-size-perl \
     imagemagick \
     ghostscript \
     supervisor \
-    netcat-openbsd \
+    curl \
     texlive-latex-base \
-    texlive-latex-extra \
+    texlive-latex-recommended \
     texlive-fonts-recommended \
     texlive-science \
-    texlive-latex-recommended \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 https://github.com/brucemiller/LaTeXML.git /tmp/latexml && \
@@ -41,6 +44,13 @@ RUN git clone --depth 1 https://github.com/dginev/LaTeXML-Plugin-latexmls.git /t
     make && \
     make install && \
     rm -rf /tmp/latexmls-plugin
+
+# Copy custom LaTeXML package bindings (overriding defaults)
+COPY bindings/ /tmp/latexml-bindings/
+RUN for f in /tmp/latexml-bindings/*; do \
+      pkgdir=$(find /usr/local/share/perl -path "*/LaTeXML/Package" -type d | head -1); \
+      [ -n "$pkgdir" ] && cp "$f" "$pkgdir/" && echo "Installed $f -> $pkgdir/"; \
+    done && rm -rf /tmp/latexml-bindings
 
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY app/ /app/

@@ -1,0 +1,29 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage[linesnumbered,ruled]{algorithm2e}
+\begin{document}
+
+\section{Algorithm2e Test}
+
+\begin{algorithm}
+\caption{Quick sort}
+\KwIn{Array $ of $ elements}
+\KwOut{Sorted array $}
+\BlankLine
+\If{ \leq 1$}{
+\Return $\;
+}
+ \gets A[1]$\;
+ \gets \{\}$\;
+ \gets \{\}$\;
+\For{ \gets 2$ \KwTo $}{
+\If{[i] < pivot$}{
+ \gets left \cup \{A[i]\}$\;
+}\Else{
+ \gets right \cup \{A[i]\}$\;
+}
+}
+\Return (left) \cup \{pivot\} \cup sort(right)$\;
+\end{algorithm}
+
+\end{document}

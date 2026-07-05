@@ -1,4 +1,4 @@
-import os, time
+import os, time, asyncio, shutil
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -6,14 +6,50 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
+import redis.asyncio as aioredis
+
 from gateway.routes import jobs, admin
 
 start_time = time.time()
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+SHARED_DIR = Path(os.environ.get("SHARED_DIR", "/shared"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.redis = None
+    pool = aioredis.ConnectionPool(
+        host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, max_connections=20
+    )
+    app.state.redis = aioredis.Redis(connection_pool=pool)
+
+    stale_threshold = 7200
+    cleanup_interval = 600
+
+    async def cleanup_loop():
+        while True:
+            await asyncio.sleep(cleanup_interval)
+            try:
+                now = time.time()
+                for entry in os.scandir(str(SHARED_DIR)):
+                    if entry.is_dir():
+                        mtime = entry.stat().st_mtime
+                        if now - mtime > stale_threshold:
+                            has_job_key = await app.state.redis.exists(f"job:{entry.name}")
+                            if not has_job_key:
+                                shutil.rmtree(entry.path, ignore_errors=True)
+            except Exception:
+                pass
+
+    task = asyncio.create_task(cleanup_loop())
+
     yield
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    await pool.aclose()
 
 app = FastAPI(title="texDocx", lifespan=lifespan)
 
@@ -24,16 +60,11 @@ app.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 @app.get("/health")
 async def health():
-    import redis.asyncio as aioredis
     issues = []
-    redis_host = os.environ.get("REDIS_HOST", "redis")
-    redis_port = int(os.environ.get("REDIS_PORT", 6379))
     latexml_host = os.environ.get("LATEXML_HOST", "latexml")
     shared_dir = os.environ.get("SHARED_DIR", "/shared")
     try:
-        r = aioredis.Redis(host=redis_host, port=redis_port, socket_connect_timeout=2)
-        await r.ping()
-        await r.aclose()
+        await app.state.redis.ping()
         redis_status = "connected"
     except Exception as e:
         redis_status = f"error: {e}"

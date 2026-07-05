@@ -1,0 +1,37 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\begin{document}
+
+\section{Algorithmicx Test}
+
+\begin{algorithm}
+\caption{Euclid's algorithm}
+\begin{algorithmic}[1]
+\Procedure{Euclid}{,b$}
+\State  \gets a \bmod b$
+\While{ \neq 0$}
+\State  \gets b$
+\State  \gets r$
+\State  \gets a \bmod b$
+\EndWhile
+\State \Return $
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+\caption{Test with conditionals}
+\begin{algorithmic}[1]
+\If{ > 0$}
+\State  \gets x + 1$
+\ElsIf{ = 0$}
+\State  \gets 0$
+\Else
+\State  \gets -x$
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}

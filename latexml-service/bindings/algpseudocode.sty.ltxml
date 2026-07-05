@@ -1,0 +1,57 @@
+package LaTeXML::Package::Pool;
+use strict;
+use warnings;
+use LaTeXML::Package;
+
+# Ensure algorithmicx infrastructure is loaded (defines \lx@algorithmicx@item,
+# <ltx:listing>, <ltx:listingline> elements)
+RequirePackage('algorithmicx');
+
+# Override algpseudocode user commands to work with the algorithmicx
+# binding infrastructure (which handles <ltx:listing>/<ltx:listingline>).
+
+# ── State ──
+DefMacro('\State',     '\lx@algorithmicx@item');
+DefMacro('\Statex',    '\lx@algorithmicx@item[]');
+
+# ── Procedures & Functions ──
+DefMacro('\Procedure{}{}',  '\lx@algorithmicx@item \textbf{Procedure} #1(#2)');
+DefMacro('\EndProcedure',   '\lx@algorithmicx@item \textbf{End Procedure}');
+DefMacro('\Function{}{}',   '\lx@algorithmicx@item \textbf{Function} #1(#2)');
+DefMacro('\EndFunction',    '\lx@algorithmicx@item \textbf{End Function}');
+
+# ── Conditionals ──
+DefMacro('\If{}',     '\lx@algorithmicx@item \textbf{if} #1 \textbf{then}');
+DefMacro('\ElsIf{}',  '\lx@algorithmicx@item \textbf{else if} #1 \textbf{then}');
+DefMacro('\Else',     '\lx@algorithmicx@item \textbf{else}');
+DefMacro('\EndIf',    '\lx@algorithmicx@item \textbf{end if}');
+
+# ── Loops ──
+DefMacro('\While{}',    '\lx@algorithmicx@item \textbf{while} #1 \textbf{do}');
+DefMacro('\EndWhile',   '\lx@algorithmicx@item \textbf{end while}');
+DefMacro('\For{}',      '\lx@algorithmicx@item \textbf{for} #1 \textbf{do}');
+DefMacro('\EndFor',     '\lx@algorithmicx@item \textbf{end for}');
+DefMacro('\ForAll{}',   '\lx@algorithmicx@item \textbf{for all} #1 \textbf{do}');
+DefMacro('\EndForAll',  '\lx@algorithmicx@item \textbf{end for all}');
+DefMacro('\Repeat',     '\lx@algorithmicx@item \textbf{repeat}');
+DefMacro('\Until{}',    '\lx@algorithmicx@item \textbf{until} #1');
+DefMacro('\Loop',       '\lx@algorithmicx@item \textbf{loop}');
+DefMacro('\EndLoop',    '\lx@algorithmicx@item \textbf{end loop}');
+
+# ── Pre/Post ──
+DefMacro('\Require{}',  '\lx@algorithmicx@item \textbf{Require:} #1');
+DefMacro('\Ensure{}',   '\lx@algorithmicx@item \textbf{Ensure:} #1');
+
+# ── Return ──
+DefMacro('\Return{}',   '\lx@algorithmicx@item \textbf{return} #1');
+
+# ── Comment ──
+DefMacro('\Comment{}',  '\lx@algorithmicx@hfill ▷ #1');
+
+# ── Operators ──
+DefMacro('\gets',   '\leftarrow');
+DefMacro('\Call{}{}', '#1(#2)');
+DefMacro('\True',   '\text{true}');
+DefMacro('\False',  '\text{false}');
+
+1;

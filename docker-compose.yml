@@ -18,10 +18,11 @@ services:
     volumes:
       - shared-data:/shared
     healthcheck:
-      test: ["CMD", "sh", "-c", "echo '' | nc -w 1 localhost 3334"]
-      interval: 10s
-      timeout: 3s
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-d", "source=\\documentclass{article}\\begin{document}t\\end{document}", "http://localhost:3334/"]
+      interval: 15s
+      timeout: 10s
       retries: 5
+      start_period: 30s
 
   gateway:
     build:
@@ -61,7 +62,7 @@ services:
       - LATEXML_HOST=latexml
       - LATEXML_PORTS=3334,3335,3336
       - SHARED_DIR=/shared
-    command: celery -A tasks.celery_app worker --loglevel=info --pool=threads --concurrency=4
+    command: celery -A tasks.celery_app worker --loglevel=info --pool=prefork --concurrency=2
     depends_on:
       redis: { condition: service_healthy }
       latexml: { condition: service_started }

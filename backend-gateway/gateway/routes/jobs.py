@@ -1,7 +1,7 @@
 import os, json, uuid, asyncio, time
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from celery import Celery
 
@@ -10,32 +10,45 @@ router = APIRouter()
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 SHARED_DIR = Path(os.environ.get("SHARED_DIR", "/shared"))
+MAX_FILE_SIZE = 50 * 1024 * 1024
+ALLOWED_EXTENSIONS = {".tex", ".zip"}
 
 celery_app = Celery("texdocx", broker=f"redis://{REDIS_HOST}:{REDIS_PORT}/0")
 
+def _validate_file(filename: str, content_length: int):
+    if content_length > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type '{ext}'. Allowed: .tex, .zip")
+
 @router.post("/submit")
 async def submit_job(
+    request: Request,
     file: UploadFile = File(...),
     format: str = Form("all"),
     macros: str = Form(None),
 ):
+    if format not in ("all", "xml", "docx"):
+        raise HTTPException(status_code=400, detail="Invalid format. Must be 'all', 'xml', or 'docx'")
+
+    content = await file.read()
+    _validate_file(file.filename or "input.zip", len(content))
+
     task_id = str(uuid.uuid4())
     job_dir = SHARED_DIR / task_id
     job_dir.mkdir(parents=True, exist_ok=True)
     zip_path = job_dir / "input.zip"
-    content = await file.read()
     zip_path.write_bytes(content)
 
-    import redis as sync_redis
-    r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-    r.hset(f"job:{task_id}", mapping={
+    await request.app.state.redis.hset(f"job:{task_id}", mapping={
         "status": "PENDING",
         "progress_percent": "0",
         "format": format,
+        "filename": file.filename or "",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
-    r.expire(f"job:{task_id}", 3600)
-    r.close()
+    await request.app.state.redis.expire(f"job:{task_id}", 3600)
 
     payload = {
         "task_id": task_id,
@@ -44,7 +57,7 @@ async def submit_job(
         "zip_path": str(zip_path),
         "job_dir": str(job_dir),
     }
-    celery_app.send_task("convert", kwargs={"payload": payload})
+    await asyncio.to_thread(celery_app.send_task, "convert", kwargs={"payload": payload})
 
     return JSONResponse(
         status_code=202,
@@ -56,11 +69,8 @@ async def submit_job(
     )
 
 @router.get("/{task_id}/status")
-async def get_status(task_id: str):
-    import redis as sync_redis
-    r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-    data = r.hgetall(f"job:{task_id}")
-    r.close()
+async def get_status(request: Request, task_id: str):
+    data = await request.app.state.redis.hgetall(f"job:{task_id}")
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
     return {
@@ -72,11 +82,8 @@ async def get_status(task_id: str):
 
 @router.head("/{task_id}/logs")
 @router.get("/{task_id}/logs")
-async def get_logs(task_id: str):
-    import redis as sync_redis
-    r = sync_redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-    raw = r.get(f"log:{task_id}")
-    r.close()
+async def get_logs(request: Request, task_id: str):
+    raw = await request.app.state.redis.get(f"log:{task_id}")
     log_file = SHARED_DIR / task_id / "output.log"
     if log_file.exists():
         text = log_file.read_text()
@@ -85,12 +92,9 @@ async def get_logs(task_id: str):
     return {"task_id": task_id, "logs": text}
 
 @router.get("/{task_id}/logs/stream")
-async def stream_logs(task_id: str):
-    import redis.asyncio as aioredis
-
+async def stream_logs(request: Request, task_id: str):
     async def event_generator():
-        r = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-        pubsub = r.pubsub()
+        pubsub = request.app.state.redis.pubsub()
         await pubsub.subscribe(f"log:{task_id}")
 
         yield "event: connected\ndata: {}\n\n"
@@ -121,7 +125,6 @@ async def stream_logs(task_id: str):
         finally:
             await pubsub.unsubscribe(f"log:{task_id}")
             await pubsub.close()
-            await r.aclose()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -1,3 +1,4 @@
+import os, subprocess, tempfile
 from pathlib import Path
 from lxml import etree
 from docx import Document
@@ -9,17 +10,7 @@ from docx.oxml.ns import qn, nsmap
 from PIL import Image as PILImage
 
 JATS_NS = "http://www.ncbi.nlm.nih.gov/JATS1"
-
-XSLT_PATH = Path(__file__).parent / "mml2omml.xsl"
-_xslt = None
-
-def get_xslt_transformer():
-    global _xslt
-    if _xslt is None:
-        if XSLT_PATH.exists():
-            xslt_tree = etree.parse(str(XSLT_PATH))
-            _xslt = etree.XSLT(xslt_tree)
-    return _xslt
+MATH_NS = "http://www.w3.org/1998/Math/MathML"
 
 
 # ── Improvement #1: Document-level defaults ──────────────────────────────────
@@ -95,6 +86,8 @@ def _setup_document_defaults(doc):
 
 def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: Path = None):
     from tasks.celery_app import publish_log
+
+    job_dir = output_path.parent
 
     doc = Document()
     _setup_document_defaults(doc)  # Improvement #1
@@ -261,6 +254,21 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
 
             elif tag in ("title", "label", "caption", "toccaption"):
                 continue
+
+            elif tag == "alternatives":
+                display = child.get("display", "inline")
+                if display == "block":
+                    block_para = doc.add_paragraph()
+                    block_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    block_para.paragraph_format.space_before = Pt(12)
+                    block_para.paragraph_format.space_after = Pt(6)
+                    math_el = child.find(f".//{{{MATH_NS}}}math")
+                    if math_el is not None:
+                        _insert_equation_image(math_el, block_para, is_block=True)
+                    else:
+                        process_children(child, doc)
+                else:
+                    process_children(child, doc)
 
             # ── Figures ───────────────────────────────────────────────────
             elif tag in ("fig", "figure"):
@@ -588,19 +596,20 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
                     if txt:
                         para.add_run(txt)
 
-            # ── Improvement #13: Block vs inline equations ────────────
-            elif tag == "math":
-                display = child.get("display") or ""
-                if display == "block":
-                    # For block math inside a paragraph, we still insert into
-                    # the current paragraph but center it
-                    _insert_math(child, para)
+            elif tag == "alternatives":
+                math_el = child.find(f".//{{{MATH_NS}}}math")
+                if math_el is not None:
+                    _insert_equation_image(math_el, para)
                 else:
-                    _insert_math(child, para)
+                    _add_inline_content(child, para)
+
+            elif tag == "math":
+                _insert_equation_image(child, para)
             elif tag == "Math":
-                # LaTeXML Math element — check for display mode
-                display = child.get("mode") or child.get("display") or ""
-                _insert_math(child, para)
+                _insert_equation_image(child, para)
+
+            elif tag == "svg":
+                continue
 
             elif tag in ("graphic", "inline-graphic", "graphics"):
                 href = child.get("{%s}href" % ns["xlink"]) or child.get("href") or child.get("graphic") or ""
@@ -674,8 +683,8 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
     def _add_inline_child(elem, para, bold=False, italic=False, mono=False):
         """Helper for nested inline formatting (e.g. bold inside italic)."""
         tag = etree.QName(elem).localname
-        if tag == "math":
-            _insert_math(elem, para)
+        if tag in ("math", "Math"):
+            _insert_equation_image(elem, para)
             return
         text = "".join(elem.itertext())
         if text:
@@ -687,23 +696,75 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
             if mono:
                 run.font.name = "Courier New"
 
-    # ── Improvement #13: Block equation handling ──────────────────────────
+    _eq_counter = 0
+
+    def _render_equation_svg(math_elem):
+        """Render a math element to SVG bytes. Handles:
+        - <math> inside <alternatives> with SVG sibling
+        - Bare <Math> (LaTeXML) elements via latex2mathml + ziamath
+        Returns (svg_bytes, is_block) or (None, False) on failure.
+        """
+        parent = math_elem.getparent()
+        if parent is not None and etree.QName(parent).localname == "alternatives":
+            for sibling in parent:
+                sibling_tag = etree.QName(sibling).localname
+                if sibling_tag == "svg":
+                    return (etree.tostring(sibling, encoding="utf-8"), parent.get("display", "inline") == "block")
+        tex_str = math_elem.get("tex")
+        if tex_str:
+            try:
+                from latex2mathml.converter import convert as latex2mathml_convert
+                import ziamath as zm
+                mathml_str = latex2mathml_convert(tex_str)
+                eqn = zm.Math(mathml_str)
+                svg_str = eqn.svg()
+                display = (math_elem.get("mode") or math_elem.get("display") or "inline") == "display"
+                return (svg_str.encode("utf-8"), display)
+            except Exception as e:
+                publish_log(task_id, "Warning", f"On-the-fly equation rendering failed: {e}")
+        return (None, False)
+
+    def _insert_equation_image(math_elem, para, is_block=False):
+        """Render equation to PNG and insert as picture in the paragraph."""
+        nonlocal _eq_counter
+        svg_bytes, detected_block = _render_equation_svg(math_elem)
+        if svg_bytes is None:
+            run = para.add_run("[eq]")
+            run.italic = True
+            return
+        _eq_counter += 1
+        svg_path = job_dir / f"_eqn{_eq_counter}.svg"
+        png_path = svg_path.with_suffix(".png")
+        try:
+            svg_path.write_bytes(svg_bytes)
+            subprocess.run(
+                ["magick", str(svg_path), "-background", "white", "-flatten", "-density", "200", str(png_path)],
+                capture_output=True, timeout=30, check=True,
+            )
+            with PILImage.open(str(png_path)) as img:
+                w, h = img.size
+                max_w = 5.5
+                aspect = h / w if w > 0 else 1
+                display_width = Inches(min(w / 150, max_w))
+                display_height = Inches(display_width.inches * aspect)
+            run = para.add_run()
+            run.add_picture(str(png_path), width=display_width)
+        except Exception as e:
+            publish_log(task_id, "Warning", f"Equation image insertion failed: {e}")
+            run = para.add_run("[eq]")
+            run.italic = True
+        finally:
+            try:
+                svg_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                png_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _insert_math(math_elem, para):
-        """Insert math as OMML. For display-mode equations, the caller
-        should have already set up a centered paragraph."""
-        try:
-            transformer = get_xslt_transformer()
-            if transformer is not None:
-                omml_tree = transformer(math_elem)
-                omml_root = omml_tree.getroot()
-                para._element.append(omml_root)
-            else:
-                raise ValueError("XSLT transformer not found")
-        except Exception as e:
-            publish_log(task_id, "Warning", f"Failed to convert MathML to OMML: {e}")
-            run = para.add_run("[math expression]")
-            run.italic = True
+        _insert_equation_image(math_elem, para, is_block=False)
 
     # ── Improvement #3: Table rendering with colspan/rowspan + rich cells ─
 

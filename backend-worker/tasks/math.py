@@ -17,18 +17,17 @@ def pre_render_math(task_id: str, xml_content: str, job_dir: Path) -> str:
             if not tex_str:
                 continue
 
-            # Convert TeX to MathML
             mathml_str = latex2mathml_convert(tex_str)
             mathml_elem = etree.fromstring(mathml_str.encode("utf-8"))
 
-            # Render MathML to SVG
             eqn = zm.Math(mathml_str)
             svg_str = eqn.svg()
             svg_elem = etree.fromstring(svg_str.encode("utf-8"))
 
             parent = math_elem.getparent()
             if parent is not None:
-                alt = etree.Element("alternatives")
+                display = math_elem.get("mode") or math_elem.get("display") or "inline"
+                alt = etree.Element("alternatives", display=display)
                 idx = parent.index(math_elem)
                 parent.insert(idx, alt)
                 parent.remove(math_elem)
