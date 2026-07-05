@@ -34,6 +34,7 @@ def _setup_document_defaults(doc):
     pf.space_before = Pt(0)
     pf.space_after = Pt(6)
     pf.line_spacing = 1.15
+    pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
     # Title style (level 0)
     title_style = doc.styles['Title']
@@ -84,16 +85,142 @@ def _setup_document_defaults(doc):
     h4.paragraph_format.space_after = Pt(2)
 
 
-def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: Path = None):
+def generate_docx(task_id: str, xml_content: str, output_path: Path, citation_style: str = "ieee", algorithm_render: str = "text", asset_dir: Path = None, template_path: Path = None):
     from tasks.celery_app import publish_log
 
     job_dir = output_path.parent
 
-    doc = Document()
-    _setup_document_defaults(doc)  # Improvement #1
+    if template_path and template_path.exists():
+        publish_log(task_id, "Info", f"Using journal template: {template_path.name}")
+        doc = Document(str(template_path))
+        # Clear existing paragraphs if any, preserving styles
+        for paragraph in doc.paragraphs:
+            p = paragraph._element
+            p.getparent().remove(p)
+    else:
+        doc = Document()
+        _setup_document_defaults(doc)  # Improvement #1
+
+    def _safe_add_heading(text, level):
+        try:
+            return doc.add_heading(text, level=level)
+        except KeyError:
+            p = doc.add_paragraph(text)
+            for run in p.runs:
+                run.bold = True
+                run.font.size = Pt(16 if level == 0 else max(10, 14 - level))
+            return p
 
     root = etree.fromstring(xml_content.encode("utf-8"))
     ns = {"jats": JATS_NS, "xlink": "http://www.w3.org/1999/xlink", "ltx": "http://dlmf.nist.gov/LaTeXML"}
+
+    CSL_DIR = Path(__file__).parent.parent / "csl"
+    VALID_STYLES = {"ieee", "apa", "mla", "chicago", "harvard"}
+
+    csl_style_name = citation_style.lower()
+    if csl_style_name not in VALID_STYLES:
+        csl_style_name = "ieee"
+
+    is_numeric_style = csl_style_name == "ieee"
+    is_author_year = csl_style_name in ("apa", "harvard", "chicago", "mla")
+
+    def format_author_year_inline(keys, csl_map):
+        parts = []
+        for k in keys:
+            entry = csl_map.get(k)
+            if not entry:
+                parts.append(k)
+                continue
+            authors = entry.get("author", [])
+            year = ""
+            issued = entry.get("issued", {})
+            if issued:
+                dp = issued.get("date-parts", [])
+                if dp and dp[0]:
+                    year = str(dp[0][0])
+            if not authors:
+                parts.append(f"({year})" if year else k)
+                continue
+            family = authors[0].get("family", "")
+            if csl_style_name == "mla":
+                parts.append(family if family else k)
+            elif csl_style_name == "chicago":
+                parts.append(f"{family} {year}" if family and year else k)
+            else:
+                parts.append(f"{family}, {year}" if family and year else k)
+        if csl_style_name == "mla":
+            return f"({', '.join(parts)})"
+        return f"({'; '.join(parts)})"
+
+    LATEXML_HOST = os.environ.get("LATEXML_HOST", "latexml")
+    LATEXML_PORTS = os.environ.get("LATEXML_PORTS", "3334").split(",")
+
+    def render_algo_png(algo_snippet):
+        import urllib.request, urllib.parse
+        import re
+        # Force [H] placement on algorithm environments to prevent floating
+        snippet_fixed = re.sub(r'\\begin\{(algorithm|algorithm\*)\}', r'\\begin{\1}[H]', algo_snippet)
+        # Detect which algorithmic package the snippet uses
+        if re.search(r'\\(STATE|WHILE|ENDWHILE|IF|ELSIF|ELSE|ENDIF|FOR|ENDFOR|REQUIRE|ENSURE|COMMENT|AND|OR|XOR|LOOP|ENDLOOP|REPEAT|UNTIL)', snippet_fixed):
+            algo_pkg = r"""\usepackage{algorithmic}"""
+        else:
+            algo_pkg = r"""\usepackage{algpseudocode}"""
+        doc = r"""\documentclass{article}
+\usepackage[paperwidth=1000pt,paperheight=5000pt,margin=10pt]{geometry}
+\usepackage{amsmath}
+\usepackage{algorithm}
+%s
+\usepackage{float}
+\usepackage{varwidth}
+\pagestyle{empty}
+\begin{document}
+\begin{varwidth}{980pt}
+%s
+\end{varwidth}
+\end{document}""" % (algo_pkg, snippet_fixed)
+        data = urllib.parse.urlencode({"source": doc}).encode()
+        last_exc = ""
+        for port in LATEXML_PORTS:
+            try:
+                port = port.strip()
+                req = urllib.request.Request(
+                    f"http://{LATEXML_HOST}:{port}/render-png",
+                    data=data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    if resp.status == 200:
+                        png_data = resp.read()
+                        try:
+                            import subprocess
+                            cmd = ["convert", "-limit", "memory", "2GB", "-limit", "map", "2GB", "-limit", "disk", "4GB", "png:-", "-trim", "+repage", "png8:-"]
+                            res = subprocess.run(cmd, input=png_data, capture_output=True, check=True)
+                            return res.stdout
+                        except subprocess.CalledProcessError as e:
+                            err_msg = e.stderr.decode('utf-8', errors='replace')
+                            publish_log(task_id, "Warning", f"convert -trim failed: {e}\n{err_msg}")
+                            return png_data
+                        except Exception as e:
+                            publish_log(task_id, "Warning", f"convert -trim failed (other): {e}")
+                            return png_data
+                    else:
+                        last_exc = f"HTTP {resp.status}"
+            except Exception as e:
+                last_exc = str(e)
+                continue
+        publish_log(task_id, "Warning", f"render_algo_png failed: {last_exc}")
+        return None
+
+    refs_json = job_dir / "references.json"
+    csl_data = None
+    csl_map = {}
+    if refs_json.exists():
+        try:
+            import json
+            csl_data = json.loads(refs_json.read_text(encoding="utf-8"))
+            csl_map = {item.get("id"): item for item in csl_data}
+        except Exception:
+            pass
 
     def find_any(parent_el, tags):
         for t in tags:
@@ -144,6 +271,29 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
             ref_map[ref_id] = str(ref_index)
             ref_index += 1
 
+    csl_bibliography = None
+    if csl_data and refs_json.exists():
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                from citeproc import CitationStylesStyle, CitationStylesBibliography
+                from citeproc import Citation, CitationItem
+                from citeproc.source.json import CiteProcJSON
+
+                csl_file = CSL_DIR / f"{csl_style_name}.csl"
+                if csl_file.exists():
+                    style = CitationStylesStyle(str(csl_file))
+                    bib_source = CiteProcJSON(csl_data)
+                    csl_bibliography = CitationStylesBibliography(style, bib_source)
+                    for item in csl_data:
+                        key = item.get("id")
+                        if key:
+                            csl_bibliography.register(Citation([CitationItem(key)]))
+        except Exception as e:
+            publish_log(task_id, "Warning", f"citeproc init failed: {e}")
+            csl_bibliography = None
+
     # ── Render document title ─────────────────────────────────────────────
     title_el = find_any(root, [".//ltx:title", ".//jats:article-title", ".//article-title"])
     if title_el is not None:
@@ -152,7 +302,7 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
         if parent_tag not in ("sec", "section", "subsection", "subsubsection", "ref-list", "figure", "fig", "table-wrap"):
             title_text = "".join(title_el.itertext()).strip()
             if title_text:
-                doc.add_heading(title_text, level=0)
+                _safe_add_heading(title_text, level=0)
 
     # ── Improvement #8: Author / affiliation metadata ─────────────────────
     _render_authors(root, doc, ns, find_any, find_all_any)
@@ -192,6 +342,8 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
         except Exception:
             return Inches(max_width_inches)
 
+    algo_counter = [0]
+
     # ── Main recursive walker ─────────────────────────────────────────────
     def process_children(parent_elem, doc_parent):
         for child in parent_elem:
@@ -206,17 +358,51 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
                 if heading_el is not None:
                     heading_text = extract_title_or_caption(heading_el, is_caption=False)
                     if heading_text:
-                        doc.add_heading(heading_text, level=level)
+                        _safe_add_heading(heading_text, level=level)
                 process_children(child, doc)
 
             # ── Paragraphs ────────────────────────────────────────────────
             elif tag == "p":
+                if algorithm_render == "image":
+                    # Check if this paragraph contains algorithm content
+                    has_caption = False
+                    has_algo_markers = False
+                    for c in child:
+                        if not isinstance(c.tag, str):
+                            continue
+                        ct = etree.QName(c).localname
+                        if ct == "text" and "caption" in (c.get("class") or ""):
+                            has_caption = True
+                        if ct == "ERROR":
+                            t = c.text or ""
+                            if any(cmd in t for cmd in ("\\Require", "\\State", "\\For", "\\If", "\\While", "\\Repeat", "\\Ensure", "\\Return", "\\Procedure", "\\Function")):
+                                has_algo_markers = True
+                    if has_algo_markers:
+                        snippet_path = job_dir / f"algo_{algo_counter[0]}.tex"
+                        algo_counter[0] += 1
+                        if snippet_path.exists():
+                            snippet = snippet_path.read_text(encoding="utf-8")
+                            publish_log(task_id, "Info", f"Rendering algorithm {algo_counter[0]-1} via latexml PNG")
+                            png_data = render_algo_png(snippet)
+                            if png_data:
+                                publish_log(task_id, "Info", f"Algorithm PNG rendered ({len(png_data)} bytes)")
+                                tmp_png = job_dir / f"_algo_{algo_counter[0]-1}.png"
+                                tmp_png.write_bytes(png_data)
+                                para = doc.add_paragraph()
+                                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                run = para.add_run()
+                                run.add_picture(str(tmp_png), width=Inches(5.5))
+                                tmp_png.unlink()
+                                continue
+                            else:
+                                publish_log(task_id, "Warning", f"Algorithm PNG rendering failed, falling back to text")
+
                 para = doc.add_paragraph()
                 _add_inline_content(child, para)
 
             # ── Improvement #7: Abstract ──────────────────────────────────
             elif tag == "abstract":
-                doc.add_heading("Abstract", level=1)
+                _safe_add_heading("Abstract", level=1)
                 # Process abstract children; render paragraphs in italic
                 for abs_child in child:
                     if not isinstance(abs_child.tag, str):
@@ -311,6 +497,23 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
                 process_children(child, doc)
             elif tag == "ref":
                 para = doc.add_paragraph(style='List Number' if 'List Number' in doc.styles else None)
+                if csl_bibliography is not None:
+                    try:
+                        citems = []
+                        for entry in csl_data:
+                            citems.append(entry)
+                        formatted = list(csl_bibliography.bibliography())
+                        if formatted:
+                            for entry_text in formatted:
+                                para.add_run(str(entry_text))
+                                break
+                            else:
+                                _add_inline_content(child, para)
+                        else:
+                            _add_inline_content(child, para)
+                        continue
+                    except Exception:
+                        pass
                 citation = find_any(child, [".//ltx:element-citation", ".//jats:element-citation", ".//element-citation"])
                 mixed = find_any(child, [".//ltx:mixed-citation", ".//jats:mixed-citation", ".//mixed-citation"])
                 if citation is not None:
@@ -362,59 +565,124 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
                 page_break_para = doc.add_paragraph()
                 run = page_break_para.add_run()
                 run.add_break(WD_BREAK.PAGE)
-                doc.add_heading("References", level=1)
+                _safe_add_heading("References", level=1)
                 process_children(child, doc)
 
             # ── Algorithm floats ──────────────────────────────────────────
             elif tag == "float":
                 cls = child.get("class") or ""
                 if "algorithm" in cls:
+                    if algorithm_render == "image":
+                        snippet_path = job_dir / f"algo_{algo_counter[0]}.tex"
+                        algo_counter[0] += 1
+                        if snippet_path.exists():
+                            snippet = snippet_path.read_text(encoding="utf-8")
+                            publish_log(task_id, "Info", f"Rendering algorithm {algo_counter[0]-1} via latexml PNG ({len(snippet)} bytes)")
+                            png_data = render_algo_png(snippet)
+                            if png_data:
+                                publish_log(task_id, "Info", f"Algorithm PNG rendered ({len(png_data)} bytes)")
+                                tmp_png = job_dir / f"_algo_{algo_counter[0]-1}.png"
+                                tmp_png.write_bytes(png_data)
+                                para = doc.add_paragraph()
+                                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                run = para.add_run()
+                                run.add_picture(str(tmp_png), width=Inches(5.5))
+                                tmp_png.unlink()
+                                continue
+                            else:
+                                publish_log(task_id, "Warning", f"Algorithm PNG rendering failed, falling back to text")
+                        else:
+                            publish_log(task_id, "Warning", f"Algorithm snippet not found: {snippet_path}")
+
                     caption_el = find_any(child, [".//ltx:caption", ".//jats:caption", ".//caption"])
                     caption_text = ""
                     if caption_el is not None:
                         caption_text = extract_title_or_caption(caption_el, is_caption=True)
-                    if caption_text:
-                        cap_para = doc.add_paragraph()
-                        run = cap_para.add_run(caption_text)
-                        run.bold = True
 
-                    # Create a single-cell table to act as a shaded code block
-                    table = doc.add_table(rows=1, cols=1)
-                    table.style = 'Table Grid'
-                    cell = table.cell(0, 0)
-
-                    from docx.oxml import parse_xml
-                    from docx.oxml.ns import nsdecls
-                    shading_elm = parse_xml(r'<w:shd {} w:fill="F4F4F6"/>'.format(nsdecls('w')))
-                    cell._tc.get_or_add_tcPr().append(shading_elm)
-
-                    # Collect all listinglines under this float
                     listinglines = child.findall(".//ltx:listingline", ns) + child.findall(".//jats:listingline", ns) + child.findall(".//listingline")
+                    if not listinglines:
+                        process_children(child, doc)
+                        continue
+
+                    table = doc.add_table(rows=2, cols=1)
+
+                    tbl = table._tbl
+                    tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement('w:tblPr')
+
+                    tblBorders = OxmlElement('w:tblBorders')
+                    for side, sz in [('top', '8'), ('bottom', '8'), ('left', '4'), ('right', '4')]:
+                        el = OxmlElement(f'w:{side}')
+                        el.set(qn('w:val'), 'single')
+                        el.set(qn('w:sz'), sz)
+                        el.set(qn('w:space'), '0')
+                        el.set(qn('w:color'), '333333')
+                        tblBorders.append(el)
+                    for side in ['insideH', 'insideV']:
+                        el = OxmlElement(f'w:{side}')
+                        el.set(qn('w:val'), 'none')
+                        el.set(qn('w:sz'), '0')
+                        el.set(qn('w:space'), '0')
+                        el.set(qn('w:color'), 'auto')
+                        tblBorders.append(el)
+                    tblPr.append(tblBorders)
+
+                    cap_cell = table.cell(0, 0)
+                    cap_para = cap_cell.paragraphs[0]
+                    if caption_text:
+                        cap_run = cap_para.add_run(caption_text)
+                        cap_run.bold = True
+                        cap_run.font.name = 'Times New Roman'
+                        cap_run.font.size = Pt(11)
+
+                    cap_tcPr = cap_cell._tc.get_or_add_tcPr()
+                    cap_borders = OxmlElement('w:tcBorders')
+                    cap_bottom = OxmlElement('w:bottom')
+                    cap_bottom.set(qn('w:val'), 'single')
+                    cap_bottom.set(qn('w:sz'), '4')
+                    cap_bottom.set(qn('w:space'), '0')
+                    cap_bottom.set(qn('w:color'), '999999')
+                    cap_borders.append(cap_bottom)
+                    cap_tcPr.append(cap_borders)
+
+                    code_cell = table.cell(1, 0)
                     first_line = True
+                    indent_level = 0
+                    import re
                     for line in listinglines:
+                        line_text = "".join(line.itertext()).lower()
+                        words = re.findall(r'\b\w+\b', line_text)
+                        
+                        if any(w in words for w in ["end", "until", "else", "elsif", "endwhile", "endif", "endfor"]):
+                            indent_level = max(0, indent_level - 1)
+
                         if first_line:
-                            para = cell.paragraphs[0]
+                            para = code_cell.paragraphs[0]
                             first_line = False
                         else:
-                            para = cell.add_paragraph()
+                            para = code_cell.add_paragraph()
 
-                        para.paragraph_format.left_indent = Inches(0.4)
-                        para.paragraph_format.space_before = Pt(2)
-                        para.paragraph_format.space_after = Pt(2)
+                        para.paragraph_format.left_indent = Inches(0.15 + indent_level * 0.2)
+                        para.paragraph_format.space_before = Pt(1)
+                        para.paragraph_format.space_after = Pt(1)
+                        para.paragraph_format.line_spacing = 1.0
+
+                        if any(w in words for w in ["while", "for", "if", "procedure", "function", "repeat", "else", "elsif", "loop"]):
+                            indent_level += 1
 
                         tag_el = find_any(line, [".//ltx:tag", ".//jats:tag", ".//tag"])
                         line_num = ""
                         if tag_el is not None and tag_el.text:
                             line_num = tag_el.text.strip()
                         if line_num:
-                            run_num = para.add_run(f"{line_num}  ")
+                            run_num = para.add_run(f"{line_num}:  ")
                             run_num.font.name = "Courier New"
-                            run_num.font.size = Pt(9.5)
+                            run_num.font.size = Pt(9)
+                            run_num.font.color.rgb = RGBColor(120, 120, 120)
 
                         _add_inline_content(line, para)
                         for r in para.runs:
                             r.font.name = "Courier New"
-                            r.font.size = Pt(9.5)
+                            r.font.size = Pt(9)
                 else:
                     process_children(child, doc)
 
@@ -579,22 +847,24 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
             elif tag == "bibref":
                 bibrefs_attr = child.get("bibrefs") or ""
                 keys = [k.strip() for k in bibrefs_attr.split(",") if k.strip()]
-                labels = []
-                for k in keys:
-                    val = ref_map.get(k) or ref_map.get("ref-" + k)
-                    if val:
-                        labels.append(val)
-                    else:
-                        labels.append(k)
-                resolved_text = ", ".join(labels)
-                if resolved_text:
-                    # Don't add brackets here — the parent <cite> element
-                    # already contains '[' as text and ']' as bibref tail
+                if is_author_year and csl_map:
+                    resolved_text = format_author_year_inline(keys, csl_map)
                     para.add_run(resolved_text)
                 else:
-                    txt = "".join(child.itertext())
-                    if txt:
-                        para.add_run(txt)
+                    labels = []
+                    for k in keys:
+                        val = ref_map.get(k) or ref_map.get("ref-" + k)
+                        if val:
+                            labels.append(val)
+                        else:
+                            labels.append(k)
+                    resolved_text = ", ".join(labels)
+                    if resolved_text:
+                        para.add_run(resolved_text)
+                    else:
+                        txt = "".join(child.itertext())
+                        if txt:
+                            para.add_run(txt)
 
             elif tag == "alternatives":
                 math_el = child.find(f".//{{{MATH_NS}}}math")
@@ -667,9 +937,34 @@ def generate_docx(task_id: str, xml_content: str, output_path: Path, asset_dir: 
             elif tag == "para":
                 _add_inline_content(child, para)
 
-            # ── <cite> — just recurse (brackets are in text/tail) ─────
+            # ── <cite> — handle bracket suppression for author-year styles ──
             elif tag == "cite":
-                _add_inline_content(child, para)
+                if is_author_year:
+                    cite_text = child.text or ""
+                    if cite_text.strip() == "[":
+                        pass
+                    elif cite_text:
+                        para.add_run(cite_text)
+                    for sub in child:
+                        if not isinstance(sub.tag, str):
+                            continue
+                        sub_tag = etree.QName(sub).localname
+                        if sub_tag == "bibref":
+                            bibrefs_attr = sub.get("bibrefs") or ""
+                            keys = [k.strip() for k in bibrefs_attr.split(",") if k.strip()]
+                            resolved = format_author_year_inline(keys, csl_map)
+                            para.add_run(resolved)
+                            sub_tail = sub.tail or ""
+                            if sub_tail.strip() != "]":
+                                if sub_tail:
+                                    para.add_run(sub_tail)
+                        else:
+                            _add_inline_child(sub, para)
+                            sub_tail = sub.tail or ""
+                            if sub_tail:
+                                para.add_run(sub_tail)
+                else:
+                    _add_inline_content(child, para)
 
             else:
                 # Unknown inline element — recurse into its children

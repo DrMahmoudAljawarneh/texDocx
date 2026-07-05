@@ -1,4 +1,4 @@
-import os, json, uuid, asyncio, time
+import os, json, uuid, asyncio, time, io, zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
@@ -26,11 +26,18 @@ def _validate_file(filename: str, content_length: int):
 async def submit_job(
     request: Request,
     file: UploadFile = File(...),
+    template: UploadFile = File(None),
     format: str = Form("all"),
     macros: str = Form(None),
+    citation_style: str = Form("ieee"),
+    algorithm_render: str = Form("text"),
 ):
     if format not in ("all", "xml", "docx"):
         raise HTTPException(status_code=400, detail="Invalid format. Must be 'all', 'xml', or 'docx'")
+    if citation_style not in ("ieee", "apa", "mla", "chicago", "harvard"):
+        raise HTTPException(status_code=400, detail=f"Invalid citation style '{citation_style}'")
+    if algorithm_render not in ("text", "image"):
+        raise HTTPException(status_code=400, detail=f"Invalid algorithm render '{algorithm_render}'")
 
     content = await file.read()
     _validate_file(file.filename or "input.zip", len(content))
@@ -39,12 +46,33 @@ async def submit_job(
     job_dir = SHARED_DIR / task_id
     job_dir.mkdir(parents=True, exist_ok=True)
     zip_path = job_dir / "input.zip"
-    zip_path.write_bytes(content)
+
+    if file.filename and file.filename.lower().endswith(".tex"):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(file.filename, content)
+        zip_path.write_bytes(buf.getvalue())
+    else:
+        zip_path.write_bytes(content)
+
+    template_path = None
+    if template and template.filename:
+        template_content = await template.read()
+        if len(template_content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="Template file too large")
+        ext = Path(template.filename).suffix.lower()
+        if ext != ".docx":
+            raise HTTPException(status_code=400, detail="Template must be a .docx file")
+        template_path_file = job_dir / "template.docx"
+        template_path_file.write_bytes(template_content)
+        template_path = str(template_path_file)
 
     await request.app.state.redis.hset(f"job:{task_id}", mapping={
         "status": "PENDING",
         "progress_percent": "0",
         "format": format,
+        "citation_style": citation_style,
+        "algorithm_render": algorithm_render,
         "filename": file.filename or "",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
@@ -54,8 +82,11 @@ async def submit_job(
         "task_id": task_id,
         "format": format,
         "macros": macros or "",
+        "citation_style": citation_style,
+        "algorithm_render": algorithm_render,
         "zip_path": str(zip_path),
         "job_dir": str(job_dir),
+        "template_path": template_path,
     }
     await asyncio.to_thread(celery_app.send_task, "convert", kwargs={"payload": payload})
 

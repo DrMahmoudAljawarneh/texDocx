@@ -23,12 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libimage-size-perl \
     imagemagick \
     ghostscript \
+    poppler-utils \
     supervisor \
     curl \
     texlive-latex-base \
     texlive-latex-recommended \
     texlive-fonts-recommended \
     texlive-science \
+    texlive-latex-extra \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 https://github.com/brucemiller/LaTeXML.git /tmp/latexml && \
@@ -54,6 +56,10 @@ RUN for f in /tmp/latexml-bindings/*; do \
 
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY app/ /app/
+
+# Allow ImageMagick to process PDFs (needed for /render-png endpoint)
+RUN sed -i '/rights="none" pattern="PDF"/s/rights="none"/rights="read | write"/' /etc/ImageMagick-6/policy.xml
+
 RUN mkdir -p /shared
 
 EXPOSE 3334 3335 3336

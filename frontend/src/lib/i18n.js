@@ -1,0 +1,132 @@
+import { writable, derived } from 'svelte/store';
+
+const translations = {
+  en: {
+    title: 'texDocx', subtitle: 'LaTeX → XML / DOCX conversion pipeline',
+    tab_file: 'Upload File', tab_code: 'Paste Code',
+    drop_text: 'Drop a .tex or .zip file here, or click to browse',
+    drop_hint: 'Maximum file size: 50 MB', preview: 'Preview source',
+    lbl_format: 'Output format', fmt_all: 'All (XML + DOCX)',
+    fmt_xml: 'XML only', fmt_docx: 'DOCX only',
+    advanced: 'Advanced options', macros_placeholder: '{"\\\\mycmd": "replacement"}',
+    submit: 'Convert', shortcut_hint: 'Press Ctrl+Enter to submit',
+    back: 'Back', copy: 'Copy', copied: 'Copied!',
+    pending: 'PENDING', processing: 'PROCESSING', success: 'SUCCESS', failure: 'FAILURE',
+    hist_title: 'History', hist_empty: 'No conversions yet',
+    clear: 'Clear', copy_log: 'Copy log',
+    download_xml: 'Download XML', download_docx: 'Download DOCX',
+    retry: 'Retry with same file',
+    toast_submitted: 'Job submitted', toast_error: 'Submission failed',
+    toast_copied: 'Copied to clipboard', toast_cleared: 'Console cleared',
+    toast_hist_cleared: 'History cleared',
+    file_too_large: 'File exceeds 50 MB limit',
+    file_invalid_ext: 'Please select a .tex or .zip file',
+    paste_placeholder: 'Paste your LaTeX code here…',
+    close: 'Close',
+  },
+  es: {
+    title: 'texDocx', subtitle: 'Pipeline de conversión LaTeX → XML / DOCX',
+    tab_file: 'Subir archivo', tab_code: 'Pegar código',
+    drop_text: 'Arrastre un archivo .tex o .zip aquí, o haga clic para buscar',
+    drop_hint: 'Tamaño máximo: 50 MB', preview: 'Vista previa',
+    lbl_format: 'Formato de salida', fmt_all: 'Todo (XML + DOCX)',
+    fmt_xml: 'Solo XML', fmt_docx: 'Solo DOCX',
+    advanced: 'Opciones avanzadas', macros_placeholder: '{"\\\\mycmd": "replacement"}',
+    submit: 'Convertir', shortcut_hint: 'Presione Ctrl+Enter para enviar',
+    back: 'Volver', copy: 'Copiar', copied: '¡Copiado!',
+    pending: 'PENDIENTE', processing: 'PROCESANDO', success: 'ÉXITO', failure: 'FALLÓ',
+    hist_title: 'Historial', hist_empty: 'Sin conversiones',
+    clear: 'Limpiar', copy_log: 'Copiar registro',
+    download_xml: 'Descargar XML', download_docx: 'Descargar DOCX',
+    retry: 'Reintentar con el mismo archivo',
+    toast_submitted: 'Trabajo enviado', toast_error: 'Error al enviar',
+    toast_copied: 'Copiado al portapapeles', toast_cleared: 'Registro limpiado',
+    toast_hist_cleared: 'Historial limpiado',
+    file_too_large: 'El archivo supera el límite de 50 MB',
+    file_invalid_ext: 'Seleccione un archivo .tex o .zip',
+    paste_placeholder: 'Pegue su código LaTeX aquí…',
+    close: 'Cerrar',
+  },
+  fr: {
+    title: 'texDocx', subtitle: 'Pipeline de conversion LaTeX → XML / DOCX',
+    tab_file: 'Télécharger un fichier', tab_code: 'Coller le code',
+    drop_text: 'Déposez un fichier .tex ou .zip ici', drop_hint: 'Taille max : 50 Mo',
+    preview: 'Aperçu', lbl_format: 'Format de sortie',
+    fmt_all: 'Tout (XML + DOCX)', fmt_xml: 'XML uniquement', fmt_docx: 'DOCX uniquement',
+    advanced: 'Options avancées', macros_placeholder: '{"\\\\mycmd": "replacement"}',
+    submit: 'Convertir', shortcut_hint: 'Appuyez sur Ctrl+Entrée',
+    back: 'Retour', copy: 'Copier', copied: 'Copié !',
+    pending: 'EN ATTENTE', processing: 'EN COURS', success: 'SUCCÈS', failure: 'ÉCHEC',
+    hist_title: 'Historique', hist_empty: 'Aucune conversion',
+    clear: 'Effacer', copy_log: 'Copier le journal',
+    download_xml: 'Télécharger XML', download_docx: 'Télécharger DOCX',
+    retry: 'Réessayer',
+    toast_submitted: 'Tâche soumise', toast_error: 'Échec de soumission',
+    toast_copied: 'Copié dans le presse-papier', toast_cleared: 'Journal effacé',
+    toast_hist_cleared: 'Historique effacé',
+    file_too_large: 'Fichier dépasse 50 Mo',
+    file_invalid_ext: 'Choisissez un fichier .tex ou .zip',
+    paste_placeholder: 'Collez votre code LaTeX ici…',
+    close: 'Fermer',
+  },
+  de: {
+    title: 'texDocx', subtitle: 'LaTeX → XML / DOCX Konvertierungspipeline',
+    tab_file: 'Datei hochladen', tab_code: 'Code einfügen',
+    drop_text: '.tex- oder .zip-Datei hier ablegen', drop_hint: 'Maximale Dateigröße: 50 MB',
+    preview: 'Vorschau', lbl_format: 'Ausgabeformat',
+    fmt_all: 'Alle (XML + DOCX)', fmt_xml: 'Nur XML', fmt_docx: 'Nur DOCX',
+    advanced: 'Erweiterte Optionen', macros_placeholder: '{"\\\\mycmd": "replacement"}',
+    submit: 'Konvertieren', shortcut_hint: 'Strg+Enter zum Absenden',
+    back: 'Zurück', copy: 'Kopieren', copied: 'Kopiert!',
+    pending: 'AUSSTEHEND', processing: 'VERARBEITUNG', success: 'ERFOLG', failure: 'FEHLER',
+    hist_title: 'Verlauf', hist_empty: 'Keine Konvertierungen',
+    clear: 'Löschen', copy_log: 'Protokoll kopieren',
+    download_xml: 'XML herunterladen', download_docx: 'DOCX herunterladen',
+    retry: 'Erneut versuchen',
+    toast_submitted: 'Auftrag eingereicht', toast_error: 'Einreichung fehlgeschlagen',
+    toast_copied: 'In Zwischenablage kopiert', toast_cleared: 'Konsole gelöscht',
+    toast_hist_cleared: 'Verlauf gelöscht',
+    file_too_large: 'Datei überschreitet 50 MB',
+    file_invalid_ext: 'Bitte .tex- oder .zip-Datei wählen',
+    paste_placeholder: 'LaTeX-Code hier einfügen…',
+    close: 'Schließen',
+  },
+  zh: {
+    title: 'texDocx', subtitle: 'LaTeX → XML / DOCX 转换管道',
+    tab_file: '上传文件', tab_code: '粘贴代码',
+    drop_text: '将 .tex 或 .zip 文件拖放到此处', drop_hint: '最大文件大小：50 MB',
+    preview: '源码预览', lbl_format: '输出格式',
+    fmt_all: '全部 (XML + DOCX)', fmt_xml: '仅 XML', fmt_docx: '仅 DOCX',
+    advanced: '高级选项', macros_placeholder: '{"\\\\mycmd": "replacement"}',
+    submit: '开始转换', shortcut_hint: '按 Ctrl+Enter 提交',
+    back: '返回', copy: '复制', copied: '已复制！',
+    pending: '等待中', processing: '处理中', success: '成功', failure: '失败',
+    hist_title: '历史记录', hist_empty: '暂无转换记录',
+    clear: '清除', copy_log: '复制日志',
+    download_xml: '下载 XML', download_docx: '下载 DOCX',
+    retry: '重试',
+    toast_submitted: '任务提交成功', toast_error: '提交失败',
+    toast_copied: '已复制到剪贴板', toast_cleared: '控制台已清除',
+    toast_hist_cleared: '历史记录已清除',
+    file_too_large: '文件超过 50 MB 限制',
+    file_invalid_ext: '请选择 .tex 或 .zip 文件',
+    paste_placeholder: '在此粘贴 LaTeX 代码…',
+    close: '关闭',
+  },
+};
+
+function getSavedLang() {
+  try { return localStorage.getItem('texdocx-lang') || 'en'; } catch { return 'en'; }
+}
+
+export const lang = writable(getSavedLang());
+
+export const _ = derived(lang, ($lang) => {
+  const dict = translations[$lang] || translations.en;
+  return (key) => dict[key] || translations.en[key] || key;
+});
+
+lang.subscribe(($lang) => {
+  try { localStorage.setItem('texdocx-lang', $lang); } catch {}
+  document.documentElement.lang = $lang;
+});

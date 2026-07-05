@@ -4,8 +4,5 @@ __pycache__
 *.pyo
 .DS_Store
 *.log
-*.md
-frontend/
-backend-gateway/
-backend-worker/
-latexml-service/
+node_modules
+dist

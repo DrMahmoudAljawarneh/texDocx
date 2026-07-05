@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="texDocx", lifespan=lifespan)
 
-app.mount("/ui", StaticFiles(directory=os.environ.get("FRONTEND_DIR", "/app/frontend"), html=True), name="ui")
+app.mount("/ui", StaticFiles(directory=os.environ.get("FRONTEND_DIR", "/app/dist"), html=True), name="ui")
 
 app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
@@ -100,5 +100,5 @@ async def health():
 @app.get("/")
 async def root():
     from fastapi.responses import FileResponse
-    frontend_dir = os.environ.get("FRONTEND_DIR", "/app/frontend")
+    frontend_dir = os.environ.get("FRONTEND_DIR", "/app/dist")
     return FileResponse(os.path.join(frontend_dir, "index.html"))

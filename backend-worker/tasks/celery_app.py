@@ -60,6 +60,9 @@ def convert(self, payload):
     task_id = payload["task_id"]
     fmt = payload["format"]
     macros = payload.get("macros", "")
+    citation_style = payload.get("citation_style", "ieee")
+    algorithm_render = payload.get("algorithm_render", "text")
+    template_path_str = payload.get("template_path")
     job_dir = Path(payload["job_dir"])
     zip_path = Path(payload["zip_path"])
 
@@ -78,6 +81,19 @@ def convert(self, payload):
             raise ValueError("No .tex files found in archive")
         main_tex = tex_files[0]
         publish_log(task_id, "Info", f"Found main TeX file: {main_tex.name}")
+
+        if algorithm_render == "image":
+            try:
+                import re
+                tex_content = main_tex.read_text(encoding="utf-8", errors="replace")
+                algo_count = 0
+                for m in re.finditer(r'\\begin\{(algorithm|algorithm\*)\}(.*?)\\end\{(algorithm|algorithm\*)\}', tex_content, re.DOTALL):
+                    snippet = m.group(0)
+                    (job_dir / f"algo_{algo_count}.tex").write_text(snippet, encoding="utf-8")
+                    algo_count += 1
+                publish_log(task_id, "Info", f"Extracted {algo_count} algorithm environments for image rendering")
+            except Exception as e:
+                publish_log(task_id, "Warning", f"Failed to extract algorithm snippets: {e}")
 
         update_status(task_id, "PROCESSING", 10)
         from tasks.images import convert_vector_assets
@@ -108,7 +124,8 @@ def convert(self, payload):
             update_status(task_id, "PROCESSING", 80)
             from tasks.docxgen import generate_docx
             docx_path = job_dir / "output.docx"
-            generate_docx(task_id, final_xml, docx_path, asset_dir=extract_dir)
+            template_path = Path(template_path_str) if template_path_str else None
+            generate_docx(task_id, final_xml, docx_path, citation_style, algorithm_render, asset_dir=extract_dir, template_path=template_path)
             publish_log(task_id, "Info", "DOCX generated")
         else:
             publish_log(task_id, "Info", "Skipping DOCX generation (xml-only mode)")

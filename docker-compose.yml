@@ -26,14 +26,13 @@ services:
 
   gateway:
     build:
-      context: ./backend-gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend-gateway/Dockerfile
     restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
       - shared-data:/shared
-      - ./frontend:/app/frontend
       - ./backend-gateway/gateway:/app/gateway
     environment:
       - REDIS_HOST=redis
